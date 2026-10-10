@@ -1,0 +1,5 @@
+{
+  "training": {"days": ["mon", "tue", "wed", "thu", "fri", "sat"], "kcal": 4340, "protein": 229, "fat": 182, "carbs": 445, "fiber": 35, "water_ml": 3500},
+  "rest": {"days": ["sun"], "kcal": 3500, "protein": 180, "fat": 160, "carbs": 330, "fiber": 30, "water_ml": 3000},
+  "weight_gain_g_per_week": [250, 450]
+}

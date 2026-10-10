@@ -1,0 +1,10 @@
+.env
+backups/
+seed/chat.md
+seed/plan_week.md
+seed/ration_days.md
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+.DS_Store

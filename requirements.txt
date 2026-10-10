@@ -1,0 +1,8 @@
+aiogram==3.31.0
+SQLAlchemy[asyncio]==2.1.4
+asyncpg==0.32.0
+alembic==1.20.0
+APScheduler==3.11.3
+anthropic==1.13.0
+pydantic-settings==2.15.0
+tzdata
