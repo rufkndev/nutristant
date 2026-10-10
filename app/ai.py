@@ -1,11 +1,11 @@
-"""Агент: клиент Anthropic, статичный системный промпт, tools, цикл tool use."""
+"""Агент: клиент OpenAI (Responses API), статичный промпт, tools, цикл вызова функций."""
 import json
 import logging
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
-import anthropic
+import openai
 
 from app import repo, services, texts
 from app.config import get_settings
@@ -114,7 +114,10 @@ TOOLS = [
      "input_schema": {"type": "object", "properties": {"days": {"type": "integer", "minimum": 1, "maximum": 31}},
                       "required": ["days"]}},
 ]
-TOOLS[-1]["cache_control"] = {"type": "ephemeral"}
+# Формат Responses API: {"type": "function", "name", "description", "parameters"}
+TOOLS = [{"type": "function", "name": t["name"], "description": t["description"],
+          "parameters": t["input_schema"], "strict": False} for t in TOOLS]
+TOOL_NAMES = {t["name"] for t in TOOLS}
 
 
 class ToolError(Exception):
@@ -255,7 +258,7 @@ class Toolbox:
                                    await repo.weights(d1 - timedelta(days=7)))
 
     async def run(self, name: str, args: dict) -> tuple[str, bool]:
-        fn = getattr(self, name, None) if name in {t["name"] for t in TOOLS} else None
+        fn = getattr(self, name, None) if name in TOOL_NAMES else None
         if fn is None:
             return f"Нет инструмента {name}", True
         try:
@@ -269,13 +272,13 @@ class Toolbox:
             return "Внутренняя ошибка инструмента", True
 
 
-_client: anthropic.AsyncAnthropic | None = None
+_client: openai.AsyncOpenAI | None = None
 
 
-def get_client() -> anthropic.AsyncAnthropic:
+def get_client() -> openai.AsyncOpenAI:
     global _client
     if _client is None:
-        _client = anthropic.AsyncAnthropic(api_key=get_settings().anthropic_api_key, max_retries=3, timeout=90.0)
+        _client = openai.AsyncOpenAI(api_key=get_settings().openai_api_key, max_retries=3, timeout=90.0)
     return _client
 
 
@@ -293,34 +296,61 @@ def history_messages(rows) -> list[dict]:
 
 
 def error_text(e: Exception) -> str:
-    if isinstance(e, anthropic.AuthenticationError):
-        reason = "неверный ANTHROPIC_API_KEY"
-    elif isinstance(e, anthropic.RateLimitError):
-        reason = "слишком много запросов"
-    elif isinstance(e, anthropic.APITimeoutError):
+    if isinstance(e, openai.AuthenticationError):
+        reason = "неверный OPENAI_API_KEY"
+    elif isinstance(e, openai.RateLimitError):
+        reason = "слишком много запросов или закончился баланс"
+    elif isinstance(e, openai.APITimeoutError):
         reason = "не ответил вовремя"
-    elif isinstance(e, anthropic.APIConnectionError):
+    elif isinstance(e, openai.APIConnectionError):
         reason = "нет связи с сервером"
-    elif isinstance(e, anthropic.APIStatusError) and e.status_code >= 500:
+    elif isinstance(e, openai.APIStatusError) and e.status_code >= 500:
         reason = "сервис перегружен"
     else:
         reason = "ошибка запроса"
     return texts.ERR_AI.format(reason=reason)
 
 
-async def call_model(client, system: list, messages: list, max_tokens: int, last: bool):
-    return await client.beta.messages.create(
-        model=get_settings().anthropic_model,
-        max_tokens=max_tokens,
-        system=system,
+def static_input() -> list[dict]:
+    """Статичная часть: точка кэша сразу после неё — tools + промпт кэшируются, контекст дня нет."""
+    return [{"role": "developer", "content": [{
+        "type": "input_text", "text": SYSTEM, "prompt_cache_breakpoint": {"mode": "explicit"}}]}]
+
+
+async def call_model(client, items: list, max_tokens: int, last: bool):
+    return await client.responses.create(
+        model=get_settings().openai_model,
+        input=items,
         tools=TOOLS,
-        tool_choice={"type": "none"} if last else {"type": "auto"},
-        messages=messages,
-        thinking={"type": "between_tools"},
-        output_config={"effort": "medium" if max_tokens > MAX_TOKENS else "low"},
-        betas=["server-side-fallback-2026-07-01"],
-        fallbacks="default",
+        tool_choice="none" if last else "auto",
+        reasoning={"effort": "none"},  # без размышлений: весь лимит токенов — на ответ
+        max_output_tokens=max_tokens,
+        prompt_cache_options={"mode": "explicit"},
+        store=False,
     )
+
+
+def output_text(resp) -> str:
+    parts = []
+    for item in resp.output:
+        if item.type == "message":
+            parts += [c.text for c in item.content if c.type == "output_text"]
+    return "\n".join(parts).strip()
+
+
+def is_refusal(resp) -> bool:
+    return any(item.type == "message" and any(c.type == "refusal" for c in item.content) for item in resp.output)
+
+
+def usage_numbers(resp) -> tuple[int, int, int, int]:
+    """(обычный вход, выход, чтение из кэша, запись в кэш). input_tokens у OpenAI включает кэш."""
+    u = resp.usage
+    if u is None:
+        return 0, 0, 0, 0
+    d = u.input_tokens_details
+    cached = getattr(d, "cached_tokens", 0) or 0
+    written = getattr(d, "cache_write_tokens", 0) or 0
+    return max((u.input_tokens or 0) - cached - written, 0), u.output_tokens or 0, cached, written
 
 
 async def run_agent(user_text: str, now_local: datetime, client=None) -> Result:
@@ -330,43 +360,44 @@ async def run_agent(user_text: str, now_local: datetime, client=None) -> Result:
     plan = await repo.get_plan_for(today)
     meals = plan.data["days"].get(services.day_key(today), []) if plan else []
     context = services.ai_context(now_local, prof.profile_text, prof.targets, meals, await repo.day_logs(today))
-    system = [
-        {"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}},
-        {"type": "text", "text": "Контекст\n" + context},
-    ]
-    messages = history_messages(await repo.recent_messages(6)) + [{"role": "user", "content": user_text}]
+    items = static_input() + [{"role": "developer", "content": "Контекст\n" + context}]
+    items += history_messages(await repo.recent_messages(6)) + [{"role": "user", "content": user_text}]
     max_tokens = MAX_TOKENS_PLAN if PLAN_RE.search(user_text) else MAX_TOKENS
     tools = Toolbox(today, prof)
     text = ""
 
     for i in range(MAX_ITER):
         try:
-            resp = await call_model(client, system, messages, max_tokens, last=i == MAX_ITER - 1)
-        except anthropic.APIError as e:
-            log.warning("Ошибка Anthropic: %r", e)
+            resp = await call_model(client, items, max_tokens, last=i == MAX_ITER - 1)
+        except openai.APIError as e:
+            log.warning("Ошибка OpenAI: %r", e)
             tools.result.text = error_text(e)
             return tools.result
-        u = resp.usage
-        await repo.add_usage(today, u.input_tokens or 0, u.output_tokens or 0,
-                             u.cache_read_input_tokens or 0, u.cache_creation_input_tokens or 0)
+        await repo.add_usage(today, *usage_numbers(resp))
 
-        text = "\n".join(b.text for b in resp.content if b.type == "text").strip()
-        uses = [b for b in resp.content if b.type == "tool_use"]
-        if resp.stop_reason == "refusal":
+        text = output_text(resp)
+        calls = [o for o in resp.output if o.type == "function_call"]
+        if is_refusal(resp):
             text = "С этим помочь не могу."
             break
-        if resp.stop_reason == "max_tokens" and max_tokens < MAX_TOKENS_PLAN:
+        incomplete = resp.status == "incomplete" and getattr(resp.incomplete_details, "reason", "") == "max_output_tokens"
+        if incomplete and max_tokens < MAX_TOKENS_PLAN:
             max_tokens = MAX_TOKENS_PLAN  # ответ не влез — повторяем с большим лимитом
             continue
-        if not uses:
+        if not calls:
             break
-        messages.append({"role": "assistant", "content": resp.content})
-        results = []
-        for b in uses:
-            out, is_err = await tools.run(b.name, dict(b.input or {}))
-            log.info("tool %s → %s", b.name, out[:200])
-            results.append({"type": "tool_result", "tool_use_id": b.id, "content": out, "is_error": is_err})
-        messages.append({"role": "user", "content": results})
+        # возвращаем ответ модели в контекст (без id: с store=False они не хранятся на сервере)
+        items += [{k: v for k, v in o.model_dump(exclude_none=True).items() if k != "id"}
+                  for o in resp.output if o.type in ("message", "function_call")]
+        for c in calls:
+            try:
+                args = json.loads(c.arguments or "{}")
+                out, is_err = await tools.run(c.name, args if isinstance(args, dict) else {})
+            except json.JSONDecodeError:
+                out, is_err = "Аргументы — невалидный JSON", True
+            log.info("tool %s → %s", c.name, out[:200])
+            items.append({"type": "function_call_output", "call_id": c.call_id,
+                          "output": f"ОШИБКА: {out}" if is_err else out})
 
     tools.result.text = text or ("Готово." if tools.result.entry_ids else "Не получилось ответить, попробуй переформулировать.")
     await repo.add_messages(("user", user_text), ("assistant", tools.result.text))

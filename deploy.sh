@@ -48,7 +48,7 @@ check_env() {
     chmod 600 .env
     say "Создан файл .env. Заполни в нём:"
     echo "   TELEGRAM_BOT_TOKEN — токен от @BotFather"
-    echo "   ANTHROPIC_API_KEY  — ключ с console.anthropic.com"
+    echo "   OPENAI_API_KEY     — ключ с platform.openai.com"
     echo "   ALLOWED_USER_ID    — свой ID от @userinfobot"
     echo "   POSTGRES_PASSWORD  — придумай пароль (и тот же в DATABASE_URL)"
     echo "Потом снова запусти ./deploy.sh"
@@ -56,7 +56,7 @@ check_env() {
   fi
   load_env
   local missing=()
-  for v in TELEGRAM_BOT_TOKEN ANTHROPIC_API_KEY ANTHROPIC_MODEL ALLOWED_USER_ID \
+  for v in TELEGRAM_BOT_TOKEN OPENAI_API_KEY OPENAI_MODEL ALLOWED_USER_ID \
            POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB DATABASE_URL; do
     [ -n "${!v:-}" ] || missing+=("$v")
   done

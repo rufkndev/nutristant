@@ -372,7 +372,7 @@ async def cmd_usage(m: Message):
 
     day = await repo.usage_sum(today, today)
     month = await repo.usage_sum(today.replace(day=1), today)
-    await m.answer(f"🤖 Расход ИИ ({cfg.anthropic_model})\n{block('Сегодня', day)}\n{block('Месяц', month)}")
+    await m.answer(f"🤖 Расход ИИ ({cfg.openai_model})\n{block('Сегодня', day)}\n{block('Месяц', month)}")
 
 
 # ---------- свободный текст → ИИ ----------
