@@ -278,7 +278,9 @@ _client: openai.AsyncOpenAI | None = None
 def get_client() -> openai.AsyncOpenAI:
     global _client
     if _client is None:
-        _client = openai.AsyncOpenAI(api_key=get_settings().openai_api_key, max_retries=3, timeout=90.0)
+        cfg = get_settings()
+        http = openai.DefaultAsyncHttpxClient(proxy=cfg.proxy_url) if cfg.proxy_url else None
+        _client = openai.AsyncOpenAI(api_key=cfg.openai_api_key, max_retries=3, timeout=90.0, http_client=http)
     return _client
 
 

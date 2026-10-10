@@ -62,6 +62,17 @@ check_env() {
   done
   [ ${#missing[@]} -eq 0 ] || die "в .env не заполнено: ${missing[*]}"
   [[ "$ALLOWED_USER_ID" =~ ^[0-9]+$ ]] || die "ALLOWED_USER_ID должен быть числом"
+  if [ -n "${PROXY_URL:-}" ] && ! [[ "$PROXY_URL" =~ ^(https?|socks5h?):// ]]; then
+    die "PROXY_URL должен начинаться с http://, https://, socks5:// или socks5h://
+   (ссылки tg://, t.me/proxy — это MTProto-прокси только для приложения Telegram, боту не подходят;
+    vless://, vmess://, ss://, trojan:// тоже напрямую не подходят)"
+  fi
+  [[ "$POSTGRES_PASSWORD" =~ ^[A-Za-z0-9_-]+$ ]] \
+    || die "POSTGRES_PASSWORD: используй только латинские буквы, цифры, _ и - (спецсимволы ломают DATABASE_URL)"
+  local expected="postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}"
+  [ "$DATABASE_URL" = "$expected" ] \
+    || die "DATABASE_URL не совпадает с POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB. Должно быть:
+   DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:<POSTGRES_PASSWORD>@db:5432/${POSTGRES_DB}"
   for f in seed/profile.md seed/targets.json seed/plan.json; do
     [ -f "$f" ] || die "нет файла $f"
   done

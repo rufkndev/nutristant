@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher
+from aiogram.client.session.aiohttp import AiohttpSession
 from alembic import command
 from alembic.config import Config
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -25,7 +26,12 @@ def run_migrations() -> None:
 async def tick(bot: Bot) -> None:
     """Раз в минуту: автокопирование плана, напоминания, вечерний итог, недельный отчёт."""
     cfg = get_settings()
-    Path(cfg.heartbeat_file).touch()
+    try:
+        # healthy только при живой связи с Telegram
+        await asyncio.wait_for(bot.get_me(), timeout=20)
+        Path(cfg.heartbeat_file).touch()
+    except Exception as e:
+        log.warning("Нет связи с Telegram: %r", e)
     try:
         prof = await repo.get_profile()
         st = {**services.DEFAULT_SETTINGS, **prof.settings}
@@ -77,7 +83,12 @@ async def main() -> None:
     if await repo.ensure_seed(cfg.seed_dir, cfg.tz, today):
         log.info("Начальные данные загружены из %s", cfg.seed_dir)
 
-    bot = Bot(cfg.telegram_bot_token)
+    session = None
+    if cfg.proxy_url:
+        # aiohttp-socks не знает socks5h — это тот же socks5 (DNS через прокси)
+        session = AiohttpSession(proxy=cfg.proxy_url.replace("socks5h://", "socks5://", 1))
+        log.info("Telegram и OpenAI — через прокси %s", cfg.proxy_url.split("@")[-1])
+    bot = Bot(cfg.telegram_bot_token, session=session)
     dp = Dispatcher()
     owner = handlers.OnlyOwner(cfg.allowed_user_id)
     dp.message.outer_middleware(owner)
